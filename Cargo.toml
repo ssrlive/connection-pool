@@ -20,11 +20,11 @@ tcp = []
 # default = ["tcp"]
 
 [dependencies]
-log = "0.4.27"
-tokio = { version = "1.47.1", features = ["full"] }
+log = "0.4.29"
+tokio = { version = "1.52.2", features = ["full"] }
 
 [dev-dependencies]
-env_logger = "0.11.8"
+env_logger = "0.11.10"
 
 [[example]]
 name = "db_example"

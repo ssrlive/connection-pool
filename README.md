@@ -56,6 +56,7 @@ impl ConnectionManager for TcpConnectionManager {
 
     fn is_valid<'a>(&'a self, conn: &'a mut Self::Connection) -> Self::ValidFut<'a> {
         Box::pin(async move {
+            // Lightweight socket check only; for real liveness use a protocol heartbeat.
             conn.peer_addr().is_ok()
         })
     }
@@ -81,8 +82,17 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+`peer_addr()` is only a cheap socket-level check. It can tell you whether the
+stream still exists locally, but it does not prove that the remote service is
+actually healthy or ready to speak your protocol.
+
+If you need stronger validation, add an application-level heartbeat such as
+`ping`/`pong`, and make `is_valid` send and verify that message instead of
+touching the data stream with a read.
+
 ## Advanced Usage
 - You can pool any connection type (e.g. database, API client) by implementing the `ConnectionManager` trait.
+- For TCP, prefer a protocol-level health check when you need to prove the peer is responsive.
 - See `examples/db_example.rs` for a custom type example.
 
 ## Testing
