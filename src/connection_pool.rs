@@ -10,6 +10,11 @@ pub const DEFAULT_MAX_SIZE: usize = 10;
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5 minutes
 pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10); // 10 seconds
 pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(30); // 30 seconds
+/// Maximum number of *idle* connections kept in the pool, regardless of
+/// `max_size`. Bounding the idle reserve prevents the pool from hoarding dozens
+/// of idle tunnels after a burst (which then all get validated with a 3s Ping
+/// and discarded -> "Connection validation failed" churn).
+pub const MAX_IDLE_KEEP: usize = 8;
 
 /// Configuration for background cleanup task
 #[derive(Clone)]
@@ -71,13 +76,19 @@ impl CleanupTaskController {
                     }
                 };
 
-                let mut connections = connections.lock().await;
-                let initial_count = connections.len();
+                // Take the idle set under the lock, then validate OUTSIDE the
+                // lock. The original held the mutex for up to the validation
+                // timeout PER connection, which stalled every acquire while the
+                // cleanup ran (a major cause of the churn-induced stalls).
+                let candidates: VecDeque<_> = {
+                    let mut connections = connections.lock().await;
+                    connections.drain(..).collect()
+                };
+                let initial_count = candidates.len();
                 let now = Instant::now();
 
-                // check both idle time and is_valid
                 let mut valid_connections = VecDeque::new();
-                for mut conn in connections.drain(..) {
+                for mut conn in candidates {
                     let not_expired = now.duration_since(conn.created_at) < max_idle_time;
                     let is_valid = if not_expired {
                         manager.is_valid(&mut conn.connection).await
@@ -89,13 +100,23 @@ impl CleanupTaskController {
                     }
                 }
                 let removed_count = initial_count - valid_connections.len();
-                *connections = valid_connections;
+
+                // Re-insert the still-valid ones, preserving anything that was
+                // added/returned while we were validating.
+                {
+                    let idle_cap = max_size.min(MAX_IDLE_KEEP);
+                    let mut connections = connections.lock().await;
+                    for conn in valid_connections {
+                        if connections.len() < idle_cap {
+                            connections.push_back(conn);
+                        }
+                    }
+                    log::debug!("Current pool (remaining {}/{idle_cap}) after cleanup", connections.len());
+                }
 
                 if removed_count > 0 {
                     log::debug!("Background cleanup removed {removed_count} expired/invalid connections");
                 }
-
-                log::debug!("Current pool (remaining {}/{max_size}) after cleanup", connections.len());
             }
         });
 
@@ -254,31 +275,35 @@ where
         // Use semaphore to limit concurrent connections
         let permit = self.semaphore.clone().acquire_owned().await.map_err(|_| PoolError::PoolClosed)?;
 
-        // Try to get an existing connection from the pool
-        {
-            let mut connections = self.connections.lock().await;
-            loop {
-                let Some(mut pooled_conn) = connections.pop_front() else {
-                    // No available connection, break the loop
-                    break;
-                };
-                log::trace!("Found existing connection in pool, validating...");
-                let age = Instant::now().duration_since(pooled_conn.created_at);
-                let is_valid = if age < self.max_idle_time {
-                    let r = self.manager.is_valid(&mut pooled_conn.connection).await;
-                    if !r {
-                        log::warn!("Connection validation failed, discarding invalid connection");
-                    }
-                    r
-                } else {
-                    log::debug!("Connection expired (age: {age:?}), discarding");
-                    false
-                };
-                if is_valid {
-                    let size = connections.len();
-                    log::debug!("Reusing existing connection from pool (remaining: {size}/{})", self.max_size);
-                    return Ok(ManagedConnection::new(pooled_conn.connection, self.clone(), permit));
+        // Try to get an existing connection from the pool. Pop under the lock
+        // but validate OUTSIDE it, so a slow/dead connection cannot block other
+        // acquires (the original held the mutex for up to the validation
+        // timeout PER connection).
+        loop {
+            let candidate = {
+                let mut connections = self.connections.lock().await;
+                connections.pop_front()
+            };
+            let Some(mut pooled_conn) = candidate else {
+                // No available connection, break the loop
+                break;
+            };
+            log::trace!("Found existing connection in pool, validating...");
+            let age = Instant::now().duration_since(pooled_conn.created_at);
+            let is_valid = if age < self.max_idle_time {
+                let r = self.manager.is_valid(&mut pooled_conn.connection).await;
+                if !r {
+                    log::warn!("Connection validation failed, discarding invalid connection");
                 }
+                r
+            } else {
+                log::debug!("Connection expired (age: {age:?}), discarding");
+                false
+            };
+            if is_valid {
+                let size = self.connections.lock().await.len();
+                log::debug!("Reusing existing connection from pool (remaining: {size}/{})", self.max_size);
+                return Ok(ManagedConnection::new(pooled_conn.connection, self.clone(), permit));
             }
         }
 
@@ -333,21 +358,32 @@ where
 
 impl<M: ConnectionManager> ConnectionPool<M> {
     async fn recycle(&self, mut connection: M::Connection) {
+        // Only keep a small idle reserve. If it is already full, drop the
+        // connection immediately WITHOUT a 3s validation round-trip (the old
+        // code validated before the size check, so every returned connection
+        // paid the health-check latency even when it was going to be dropped).
+        let idle_cap = self.max_size.min(MAX_IDLE_KEEP);
+        {
+            let connections = self.connections.lock().await;
+            if connections.len() >= idle_cap {
+                log::debug!("Idle pool full ({idle_cap}), dropping connection");
+                return;
+            }
+        }
         if !self.manager.is_valid(&mut connection).await {
             log::debug!("Invalid connection, dropping");
             return;
         }
         let mut connections = self.connections.lock().await;
-        if connections.len() < self.max_size {
+        if connections.len() < idle_cap {
             connections.push_back(InnerConnection {
                 connection,
                 created_at: Instant::now(),
             });
-            log::debug!("Connection recycled to pool (pool size: {}/{})", connections.len(), self.max_size);
+            log::debug!("Connection recycled to pool (pool size: {}/{})", connections.len(), idle_cap);
         } else {
-            log::debug!("Pool is full, dropping connection (pool max size: {})", self.max_size);
+            log::debug!("Idle pool full ({idle_cap}), dropping connection");
         }
-        // If the pool is full, the connection will be dropped (automatically closed)
     }
 }
 

@@ -108,6 +108,12 @@ cargo test
 | `max_idle_time` | Connection idle timeout | 5 minutes |
 | `connection_timeout` | Connection creation timeout | 10 seconds |
 | `cleanup_interval` | Background cleanup interval | 30 seconds |
+| `MAX_IDLE_KEEP` | Maximum number of *idle* connections kept (≤ `max_size`) | 8 |
+
+> `max_size` still governs concurrency (via the semaphore); `MAX_IDLE_KEEP` only
+> bounds how many **idle** connections are retained for reuse. Keeping the full
+> `max_size` idle made the pool validate dozens of idle connections and churn
+> under load, so the idle reserve is deliberately small.
 
 ## 🏗️ Architecture
 
