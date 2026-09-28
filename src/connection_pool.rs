@@ -88,10 +88,22 @@ impl CleanupTaskController {
                 let now = Instant::now();
 
                 let mut valid_connections = VecDeque::new();
-                for mut conn in candidates {
+                let mut candidates = candidates;
+                let mut shutdown_requested = false;
+                while let Some(mut conn) = candidates.pop_front() {
                     let not_expired = now.duration_since(conn.created_at) < max_idle_time;
                     let is_valid = if not_expired {
-                        manager.is_valid(&mut conn.connection).await
+                        let validation = tokio::select! {
+                            _ = &mut shutdown_rx => None,
+                            is_valid = manager.is_valid(&mut conn.connection) => Some(is_valid),
+                        };
+                        let Some(is_valid) = validation else {
+                            // Cancellation may leave the mutably validated connection in an unknown state.
+                            valid_connections.append(&mut candidates);
+                            shutdown_requested = true;
+                            break;
+                        };
+                        is_valid
                     } else {
                         false
                     };
@@ -116,6 +128,10 @@ impl CleanupTaskController {
 
                 if removed_count > 0 {
                     log::debug!("Background cleanup removed {removed_count} expired/invalid connections");
+                }
+
+                if shutdown_requested {
+                    break;
                 }
             }
         });

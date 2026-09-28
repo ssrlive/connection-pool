@@ -29,6 +29,7 @@ Add `connection-pool` to your `Cargo.toml`:
 connection-pool = "0.2"
 tokio = { version = "1.47", features = ["full"] }
 ```
+
 Then you can use the connection pool in your application:
 
 ```rust,no_run
@@ -91,24 +92,26 @@ If you need stronger validation, add an application-level heartbeat such as
 touching the data stream with a read.
 
 ## Advanced Usage
+
 - You can pool any connection type (e.g. database, API client) by implementing the `ConnectionManager` trait.
 - For TCP, prefer a protocol-level health check when you need to prove the peer is responsive.
 - See `examples/db_example.rs` for a custom type example.
 
 ## Testing
+
 ```bash
 cargo test
 ```
 
 ## 🎛️ Configuration Options
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `max_size` | Maximum number of connections | 10 |
-| `max_idle_time` | Connection idle timeout | 5 minutes |
-| `connection_timeout` | Connection creation timeout | 10 seconds |
-| `cleanup_interval` | Background cleanup interval | 30 seconds |
-| `MAX_IDLE_KEEP` | Maximum number of *idle* connections kept (≤ `max_size`) | 8 |
+| Parameter            | Description                                              | Default    |
+| -------------------- | -------------------------------------------------------- | ---------- |
+| `max_size`           | Maximum number of connections                            | 10         |
+| `max_idle_time`      | Connection idle timeout                                  | 5 minutes  |
+| `connection_timeout` | Connection creation timeout                              | 10 seconds |
+| `cleanup_interval`   | Background cleanup interval                              | 30 seconds |
+| `MAX_IDLE_KEEP`      | Maximum number of _idle_ connections kept (≤ `max_size`) | 8          |
 
 > `max_size` still governs concurrency (via the semaphore); `MAX_IDLE_KEEP` only
 > bounds how many **idle** connections are retained for reuse. Keeping the full
@@ -116,7 +119,6 @@ cargo test
 > under load, so the idle reserve is deliberately small.
 
 ## 🏗️ Architecture
-
 
 The connection pool is now based on a single `ConnectionManager` abstraction:
 
@@ -153,7 +155,7 @@ The connection pool is now based on a single `ConnectionManager` abstraction:
 ### Key Components
 
 - **Semaphore**: Controls maximum concurrent connections
-- **Background Cleanup**: Async task for removing expired connections  
+- **Background Cleanup**: Async task for removing expired connections
 - **Connection Queue**: FIFO queue of available connections
 - **RAII Wrapper**: `PooledStream` for automatic connection return
 
@@ -165,7 +167,7 @@ Run the examples to see the pool in action:
 # Basic TCP example
 cargo run --example echo_example
 
-# Database connection example  
+# Database connection example
 cargo run --example db_example
 
 # Background cleanup demonstration
